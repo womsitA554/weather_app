@@ -1,0 +1,18 @@
+<resources>
+    <!-- Light Theme -->
+    <style name="Base.Theme.Weather_kotlin.Light" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/backGroundDark</item>
+        <item name="colorPrimaryDark">@color/backGroundLight</item>
+        <item name="colorAccent">@color/white</item>
+    </style>
+
+    <!-- Dark Theme -->
+    <style name="Base.Theme.Weather_kotlin.Dark" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/backGroundLight</item>
+        <item name="colorPrimaryDark">@color/backGroundDark</item>
+        <item name="colorAccent">@color/white</item>
+    </style>
+
+    <style name="Theme.Weather_kotlin.Light" parent="Base.Theme.Weather_kotlin.Light" />
+    <style name="Theme.Weather_kotlin.Dark" parent="Base.Theme.Weather_kotlin.Dark" />
+</resources>

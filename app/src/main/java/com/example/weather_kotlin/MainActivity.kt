@@ -6,14 +6,17 @@ import android.os.AsyncTask
 import android.os.Bundle
 import android.util.Log
 import android.view.View
+import android.widget.ArrayAdapter
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.SearchView
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.example.weather_kotlin.databinding.ActivityMainBinding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -22,12 +25,11 @@ import java.util.ArrayList
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
-import kotlin.math.log
 
 class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
-    val CITY: String = "London,gb"
-    val API: String = "982cfb3f7fe00de65d41907bfbe382f9"
+    private val DEFAULT_CITY: String = "London,gb"
+    private val API: String = "982cfb3f7fe00de65d41907bfbe382f9"
 
     private lateinit var adapter: Adapter
     private var list: MutableList<HourWeather> = mutableListOf()
@@ -37,9 +39,10 @@ class MainActivity : AppCompatActivity() {
     private var listDay: MutableList<DayWeather> = mutableListOf()
 
     private lateinit var address: String
+    private var lastQueryTime: Long = 0
+    private val debounceDelay: Long = 500 // 500ms để tránh gọi API quá nhanh
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        // Check the current hour before calling super.onCreate()
         val currentHour = getCurrentHour().toInt()
 
         if (currentHour in 6..17) {
@@ -59,18 +62,93 @@ class MainActivity : AppCompatActivity() {
             binding.main.setBackgroundResource(R.drawable.linear_bg_night)
         }
 
+        // Thiết lập SearchView và gợi ý
+        setupSearchView()
 
-        weatherTask().execute()
-        WeatherTaskHour().execute()
+        // Gọi GeocodingTask với thành phố mặc định
+        GeocodingTask().execute(DEFAULT_CITY)
 
         lifecycleScope.launch {
             withContext(Dispatchers.IO) {
                 setUpRecycleView()
             }
         }
-
     }
 
+    private fun setupSearchView() {
+        // Thiết lập adapter cho ListView gợi ý
+        val suggestionAdapter = ArrayAdapter<String>(this, android.R.layout.simple_list_item_1, mutableListOf<String>())
+        binding.suggestionList.adapter = suggestionAdapter
+
+        // Xử lý click vào gợi ý
+        binding.suggestionList.setOnItemClickListener { _, _, position, _ ->
+            val selectedCity = suggestionAdapter.getItem(position) ?: return@setOnItemClickListener
+            // Xóa truy vấn và ẩn gợi ý
+            binding.searchView.setQuery("", false)
+            binding.suggestionList.visibility = View.GONE
+            binding.searchView.clearFocus()
+            // Xóa dữ liệu cũ
+            list.clear()
+            list1.clear()
+            listDay.clear()
+            adapter.notifyDataSetChanged()
+            adapterDay.notifyDataSetChanged()
+            // Gọi GeocodingTask với thành phố được chọn
+            GeocodingTask().execute(selectedCity)
+        }
+
+        // Xử lý sự kiện tìm kiếm và gợi ý
+        binding.searchView.setOnQueryTextListener(object : SearchView.OnQueryTextListener {
+            override fun onQueryTextSubmit(query: String?): Boolean {
+                query?.trim()?.let { city ->
+                    if (city.isNotEmpty()) {
+                        // Xóa dữ liệu cũ
+                        list.clear()
+                        list1.clear()
+                        listDay.clear()
+                        adapter.notifyDataSetChanged()
+                        adapterDay.notifyDataSetChanged()
+                        // Gọi GeocodingTask
+                        GeocodingTask().execute(city)
+                        binding.searchView.setQuery("", false)
+                        binding.suggestionList.visibility = View.GONE
+                        binding.searchView.clearFocus()
+                    } else {
+                        Toast.makeText(this@MainActivity, "Please enter a city name", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                return true
+            }
+
+            override fun onQueryTextChange(newText: String?): Boolean {
+                newText?.trim()?.let { query ->
+                    if (query.length >= 2) {
+                        val currentTime = System.currentTimeMillis()
+                        if (currentTime - lastQueryTime >= debounceDelay) {
+                            lastQueryTime = currentTime
+                            SuggestionTask(suggestionAdapter).execute(query)
+                            binding.suggestionList.visibility = View.VISIBLE
+                        }
+                    } else {
+                        suggestionAdapter.clear()
+                        suggestionAdapter.notifyDataSetChanged()
+                        binding.suggestionList.visibility = View.GONE
+                    }
+                } ?: run {
+                    suggestionAdapter.clear()
+                    suggestionAdapter.notifyDataSetChanged()
+                    binding.suggestionList.visibility = View.GONE
+                }
+                return true
+            }
+        })
+
+        // Ẩn ListView khi đóng SearchView
+        binding.searchView.setOnCloseListener {
+            binding.suggestionList.visibility = View.GONE
+            false
+        }
+    }
 
     private fun getCurrentHour(): String {
         val calendar = Calendar.getInstance()
@@ -83,7 +161,6 @@ class MainActivity : AppCompatActivity() {
         val dateFormat = SimpleDateFormat("MMM, d", Locale.ENGLISH)
         return dateFormat.format(calendar.time)
     }
-
 
     private fun setUpRecycleView() {
         adapter = Adapter(list)
@@ -99,11 +176,9 @@ class MainActivity : AppCompatActivity() {
         try {
             adapterDay.onClickItem = { dayWeather, position ->
                 val intent = Intent(this, Detail::class.java).apply {
-                    // Define the date formats
                     val sourceDateFormat = SimpleDateFormat("EEE MMM dd HH:mm:ss zzz yyyy", Locale.ENGLISH)
                     val targetDateFormat = SimpleDateFormat("MMM, d", Locale.ENGLISH)
 
-                    // Filter the list based on date comparison
                     val selectedDayWeatherList = list1.filter {
                         try {
                             val parsedDate = sourceDateFormat.parse(it.date)
@@ -117,11 +192,9 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
 
-                    // Log the size of selectedDayWeatherList for debugging
                     Log.d("SelectedDayWeatherListSize", "Size: ${selectedDayWeatherList.size}")
 
-                    // Pass the filtered list
-                    intent.putParcelableArrayListExtra("HOUR_WEATHER_LIST", ArrayList(selectedDayWeatherList))
+                    putParcelableArrayListExtra("HOUR_WEATHER_LIST", ArrayList(selectedDayWeatherList))
                     putExtra("ADDRESS", address)
                     putExtra("DATE", dayWeather.date)
                     putExtra("WEATHER_ICON", dayWeather.img)
@@ -140,10 +213,130 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             Log.d("checkList1", e.toString())
         }
-
     }
 
-    inner class weatherTask() : AsyncTask<String, Void, String>() {
+    // AsyncTask để lấy gợi ý thành phố
+    inner class SuggestionTask(private val adapter: ArrayAdapter<String>) : AsyncTask<String, Void, List<String>>() {
+        override fun doInBackground(vararg params: String?): List<String> {
+            val suggestions = mutableListOf<String>()
+            var connection: HttpURLConnection? = null
+            try {
+                val query = params.getOrNull(0) ?: return suggestions
+                val url = URL("https://api.openweathermap.org/geo/1.0/direct?q=$query&limit=5&appid=$API")
+                connection = url.openConnection() as HttpURLConnection
+                connection.requestMethod = "GET"
+                connection.connectTimeout = 5000
+                connection.readTimeout = 5000
+
+                val responseCode = connection.responseCode
+                if (responseCode == HttpURLConnection.HTTP_OK) {
+                    val response = connection.inputStream.bufferedReader().use { it.readText() }
+                    Log.d("SuggestionTask", "Response: $response")
+                    val jsonArray = JSONArray(response)
+                    for (i in 0 until jsonArray.length()) {
+                        val jsonObject = jsonArray.getJSONObject(i)
+                        if (jsonObject.has("name") && jsonObject.has("country")) {
+                            val city = jsonObject.getString("name")
+                            val country = jsonObject.getString("country")
+                            suggestions.add("$city, $country")
+                        }
+                    }
+                } else {
+                    val errorStream = connection.errorStream?.bufferedReader()?.use { it.readText() }
+                    Log.e("SuggestionTask", "HTTP error: $responseCode, Message: $errorStream")
+                }
+            } catch (e: Exception) {
+                Log.e("SuggestionTask", "Error fetching suggestions: ${e.message}", e)
+            } finally {
+                connection?.disconnect()
+            }
+            return suggestions
+        }
+
+        override fun onPostExecute(result: List<String>?) {
+            super.onPostExecute(result)
+            adapter.clear()
+            if (result != null && result.isNotEmpty()) {
+                adapter.addAll(result)
+                binding.suggestionList.visibility = View.VISIBLE
+            } else {
+                binding.suggestionList.visibility = View.GONE
+            }
+            adapter.notifyDataSetChanged()
+        }
+    }
+
+    inner class GeocodingTask : AsyncTask<String, Void, Pair<Double, Double>?>() {
+        override fun doInBackground(vararg params: String?): Pair<Double, Double>? {
+            var response: String? = null
+            var connection: HttpURLConnection? = null
+            try {
+                val city = params.getOrNull(0) ?: DEFAULT_CITY
+                val url = URL("https://api.openweathermap.org/geo/1.0/direct?q=$city&limit=1&appid=$API")
+                connection = url.openConnection() as HttpURLConnection
+                connection.requestMethod = "GET"
+                connection.connectTimeout = 5000
+                connection.readTimeout = 5000
+
+                val responseCode = connection.responseCode
+                if (responseCode == HttpURLConnection.HTTP_OK) {
+                    response = connection.inputStream.bufferedReader().use { it.readText() }
+                    Log.d("GeocodingTask", "Response: $response")
+                } else {
+                    val errorStream = connection.errorStream?.bufferedReader()?.use { it.readText() }
+                    Log.e("GeocodingTask", "HTTP error: $responseCode, Message: $errorStream")
+                    return null
+                }
+
+                response?.let {
+                    val jsonArray = JSONArray(it)
+                    if (jsonArray.length() > 0) {
+                        val jsonObject = jsonArray.getJSONObject(0)
+                        if (jsonObject.has("lat") && jsonObject.has("lon") && jsonObject.has("name") && jsonObject.has("country")) {
+                            val lat = jsonObject.getDouble("lat")
+                            val lon = jsonObject.getDouble("lon")
+                            address = "${jsonObject.getString("name")}, ${jsonObject.getString("country")}"
+                            Log.d("GeocodingTask", "Latitude: $lat, Longitude: $lon, Address: $address")
+                            return Pair(lat, lon)
+                        } else {
+                            Log.e("GeocodingTask", "Missing required fields in JSON: $it")
+                        }
+                    } else {
+                        Log.e("GeocodingTask", "No results found for city: $city")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("GeocodingTask", "Error fetching data: ${e.message}", e)
+            } finally {
+                connection?.disconnect()
+            }
+            return null
+        }
+
+        override fun onPostExecute(result: Pair<Double, Double>?) {
+            super.onPostExecute(result)
+            if (result != null) {
+                val (lat, lon) = result
+                Log.d("GeocodingTask", "Success: Calling weather tasks with lat=$lat, lon=$lon")
+                weatherTask(lat, lon).execute()
+                WeatherTaskHour(lat, lon).execute()
+            } else {
+                runOnUiThread {
+                    binding.progressBar.visibility = View.GONE
+                    binding.tvError.visibility = View.VISIBLE
+                    binding.imgNetwork.visibility = View.VISIBLE
+                    Toast.makeText(
+                        this@MainActivity,
+                        "City not found, please try again",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+                Log.e("GeocodingTask", "Failed to get coordinates")
+            }
+        }
+    }
+
+    inner class weatherTask(private val lat: Double, private val lon: Double) : AsyncTask<String, Void, String>() {
         override fun onPreExecute() {
             super.onPreExecute()
             binding.imgNetwork.visibility = View.GONE
@@ -153,19 +346,32 @@ class MainActivity : AppCompatActivity() {
         }
 
         override fun doInBackground(vararg params: String?): String? {
-            var reponse: String?
-
+            var response: String? = null
+            var connection: HttpURLConnection? = null
             try {
-                reponse =
-                    URL("https://api.openweathermap.org/data/2.5/weather?q=$CITY&units=metric&appid=$API").readText(
-                        Charsets.UTF_8
-                    )
+                val url = URL("https://api.openweathermap.org/data/2.5/weather?lat=$lat&lon=$lon&units=metric&appid=$API")
+                connection = url.openConnection() as HttpURLConnection
+                connection.requestMethod = "GET"
+                connection.connectTimeout = 5000
+                connection.readTimeout = 5000
+
+                val responseCode = connection.responseCode
+                if (responseCode == HttpURLConnection.HTTP_OK) {
+                    response = connection.inputStream.bufferedReader().use { it.readText() }
+                } else {
+                    val errorStream = connection.errorStream?.bufferedReader()?.use { it.readText() }
+                    Log.e("weatherTask", "HTTP error: $responseCode, Message: $errorStream")
+                    return null
+                }
             } catch (e: Exception) {
-                reponse = null
+                Log.e("weatherTask", "Error fetching data: ${e.message}", e)
+            } finally {
+                connection?.disconnect()
             }
-            return reponse
+            return response
         }
 
+        @SuppressLint("SetTextI18n")
         override fun onPostExecute(result: String?) {
             super.onPostExecute(result)
             if (result != null) {
@@ -175,208 +381,74 @@ class MainActivity : AppCompatActivity() {
                     val sys = jsonObj.getJSONObject("sys")
                     val wind = jsonObj.getJSONObject("wind")
                     val weather = jsonObj.getJSONArray("weather").getJSONObject(0)
-                    address = jsonObj.getString("name") + ", " + sys.getString("country")
+
                     val updateAt: Long = jsonObj.getLong("dt")
-
-                    val updateAtText =
-                        SimpleDateFormat(
-                            "EEE, MMM dd",
-                            Locale.ENGLISH
-                        ).format(Date(updateAt * 1000))
-
+                    val updateAtText = SimpleDateFormat("EEE, MMM dd", Locale.ENGLISH).format(Date(updateAt * 1000))
                     val temp = main.getString("temp")
-
-
-                    val tempMin = "Min.: " + main.getString("temp_min") + "°C"
-                    val tempMax = "Max.: " + main.getString("temp_max") + "°C"
-                    val pressure = main.getString("pressure") + " hPa"
-                    val humidity = main.getString("humidity") + " %"
+                    val tempMin = "Min.: ${main.getString("temp_min")}°C"
+                    val tempMax = "Max.: ${main.getString("temp_max")}°C"
+                    val pressure = "${main.getString("pressure")} hPa"
+                    val humidity = "${main.getString("humidity")} %"
                     val sunrise: Long = sys.getLong("sunrise")
                     val sunset: Long = sys.getLong("sunset")
-                    val windSpeed = wind.getString("speed") + " km/h"
-                    val weatherDescription = weather.getString(("description"))
+                    val windSpeed = "${wind.getString("speed")} km/h"
+                    val weatherDescription = weather.getString("description")
                     val checkRain = weather.getString("main")
 
                     var rainVolume = "0 mm"
-                    if (checkRain.equals("Rain")) {
+                    if (checkRain == "Rain") {
                         if (jsonObj.has("rain")) {
                             val rain = jsonObj.getJSONObject("rain")
                             if (rain.has("1h")) {
-                                rainVolume = rain.getString("1h") + " mm"
-                                binding.tvRainVolume.text = rainVolume
-                                Log.d("rain2", rainVolume)
+                                rainVolume = "${rain.getString("1h")} mm"
                             }
                         }
-                    } else {
-                        binding.tvRainVolume.text = rainVolume
-                        Log.d("rain2", "none")
                     }
-
+                    binding.tvRainVolume.text = rainVolume
 
                     val weatherId = weather.getString("id")
                     val tempDouble = temp.toDoubleOrNull()
-                    val tempInt = tempDouble?.toInt()
-
-                    binding.tvAddress.text = address
+                    val tempInt = tempDouble?.toInt() ?: 0
 
                     binding.tvUpdateAt.text = getCurrentDate()
 
                     val currentHour = getCurrentHour().toInt()
-
                     if (currentHour in 6..17) {
-                        if (weatherId == "800") {
-                            binding.img.setImageResource(R.drawable.sunny)
-                        } else if (weatherId == "801") {
-                            binding.img.setImageResource(R.drawable.pcloudy)
-                        } else if (weatherId == "802") {
-                            binding.img.setImageResource(R.drawable.pcloudy)
-                        } else if (weatherId == "803") {
-                            binding.img.setImageResource(R.drawable.mcloudy)
-                        } else if (weatherId == "804") {
-                            binding.img.setImageResource(R.drawable.mcloudy)
-                        } else if (weatherId == "500") {
-                            binding.img.setImageResource(R.drawable.lrain)
-                        } else if (weatherId == "501") {
-                            binding.img.setImageResource(R.drawable.lrain)
-                        } else if (weatherId == "502") {
-                            binding.img.setImageResource(R.drawable.lrain)
-                        } else if (weatherId == "503") {
-                            binding.img.setImageResource(R.drawable.rain)
-                        } else if (weatherId == "504") {
-                            binding.img.setImageResource(R.drawable.rain)
-                        } else if (weatherId == "511") {
-                            binding.img.setImageResource(R.drawable.rain)
-                        } else if (weatherId == "600") {
-                            binding.img.setImageResource(R.drawable.lsnow)
-                        } else if (weatherId == "601") {
-                            binding.img.setImageResource(R.drawable.lsnow)
-                        } else if (weatherId == "602") {
-                            binding.img.setImageResource(R.drawable.snow)
-                        } else if (weatherId == "611") {
-                            binding.img.setImageResource(R.drawable.sleet)
-                        } else if (weatherId == "612") {
-                            binding.img.setImageResource(R.drawable.sleet)
-                        } else if (weatherId == "613") {
-                            binding.img.setImageResource(R.drawable.sleet)
-                        } else if (weatherId == "614") {
-                            binding.img.setImageResource(R.drawable.sleet)
-                        } else if (weatherId == "200") {
-                            binding.img.setImageResource(R.drawable.tshower)
-                        } else if (weatherId == "201") {
-                            binding.img.setImageResource(R.drawable.tshower)
-                        } else if (weatherId == "202") {
-                            binding.img.setImageResource(R.drawable.tstorm)
-                        } else if (weatherId == "210") {
-                            binding.img.setImageResource(R.drawable.sleet)
-                        } else if (weatherId == "211") {
-                            binding.img.setImageResource(R.drawable.sleet)
-                        } else if (weatherId == "212") {
-                            binding.img.setImageResource(R.drawable.sleet)
-                        } else if (weatherId == "701") {
-                            binding.img.setImageResource(R.drawable.foggy)
-                        } else if (weatherId == "702") {
-                            binding.img.setImageResource(R.drawable.foggy)
-                        } else if (weatherId == "703") {
-                            binding.img.setImageResource(R.drawable.foggy)
-                        } else if (weatherId == "704") {
-                            binding.img.setImageResource(R.drawable.foggy)
-                        } else if (weatherId == "771") {
-                            binding.img.setImageResource(R.drawable.foggy)
-                        } else if (weatherId == "762") {
-                            binding.img.setImageResource(R.drawable.foggy)
-                        } else if (weatherId == "763") {
-                            binding.img.setImageResource(R.drawable.foggy)
-                        } else if (weatherId == "751") {
-                            binding.img.setImageResource(R.drawable.snow)
-                        } else if (weatherId == "761") {
-                            binding.img.setImageResource(R.drawable.snow)
-                        } else if (weatherId == "752") {
-                            binding.img.setImageResource(R.drawable.snow)
-                        } else {
-                            binding.img.setImageResource(R.drawable.snow)
+                        when (weatherId) {
+                            "800" -> binding.img.setImageResource(R.drawable.sunny)
+                            "801", "802" -> binding.img.setImageResource(R.drawable.pcloudy)
+                            "803", "804" -> binding.img.setImageResource(R.drawable.mcloudy)
+                            "500", "501", "502" -> binding.img.setImageResource(R.drawable.lrain)
+                            "503", "504", "511" -> binding.img.setImageResource(R.drawable.rain)
+                            "600", "601" -> binding.img.setImageResource(R.drawable.lsnow)
+                            "602" -> binding.img.setImageResource(R.drawable.snow)
+                            "611", "612", "613", "614" -> binding.img.setImageResource(R.drawable.sleet)
+                            "200", "201" -> binding.img.setImageResource(R.drawable.tshower)
+                            "202", "210", "211", "212" -> binding.img.setImageResource(R.drawable.tstorm)
+                            else -> binding.img.setImageResource(R.drawable.foggy)
                         }
                     } else {
-                        if (weatherId == "800") {
-                            binding.img.setImageResource(R.drawable.moon)
-                        } else if (weatherId == "801") {
-                            binding.img.setImageResource(R.drawable.pcloudy_night)
-                        } else if (weatherId == "802") {
-                            binding.img.setImageResource(R.drawable.pcloudy_night)
-                        } else if (weatherId == "803") {
-                            binding.img.setImageResource(R.drawable.mcloudy_night)
-                        } else if (weatherId == "804") {
-                            binding.img.setImageResource(R.drawable.mcloudy_night)
-                        } else if (weatherId == "500") {
-                            binding.img.setImageResource(R.drawable.lrain_night)
-                        } else if (weatherId == "501") {
-                            binding.img.setImageResource(R.drawable.lrain_night)
-                        } else if (weatherId == "502") {
-                            binding.img.setImageResource(R.drawable.lrain_night)
-                        } else if (weatherId == "503") {
-                            binding.img.setImageResource(R.drawable.rain_night)
-                        } else if (weatherId == "504") {
-                            binding.img.setImageResource(R.drawable.rain_night)
-                        } else if (weatherId == "511") {
-                            binding.img.setImageResource(R.drawable.rain_night)
-                        } else if (weatherId == "600") {
-                            binding.img.setImageResource(R.drawable.lsnow_night)
-                        } else if (weatherId == "601") {
-                            binding.img.setImageResource(R.drawable.lsnow_night)
-                        } else if (weatherId == "602") {
-                            binding.img.setImageResource(R.drawable.snow_night)
-                        } else if (weatherId == "611") {
-                            binding.img.setImageResource(R.drawable.sleet_night)
-                        } else if (weatherId == "612") {
-                            binding.img.setImageResource(R.drawable.sleet_night)
-                        } else if (weatherId == "613") {
-                            binding.img.setImageResource(R.drawable.sleet_night)
-                        } else if (weatherId == "614") {
-                            binding.img.setImageResource(R.drawable.sleet_night)
-                        } else if (weatherId == "200") {
-                            binding.img.setImageResource(R.drawable.tshower_night)
-                        } else if (weatherId == "201") {
-                            binding.img.setImageResource(R.drawable.tshower_night)
-                        } else if (weatherId == "202") {
-                            binding.img.setImageResource(R.drawable.tstorm_night)
-                        } else if (weatherId == "210") {
-                            binding.img.setImageResource(R.drawable.sleet_night)
-                        } else if (weatherId == "211") {
-                            binding.img.setImageResource(R.drawable.sleet_night)
-                        } else if (weatherId == "212") {
-                            binding.img.setImageResource(R.drawable.sleet_night)
-                        } else if (weatherId == "701") {
-                            binding.img.setImageResource(R.drawable.foggy_night)
-                        } else if (weatherId == "702") {
-                            binding.img.setImageResource(R.drawable.foggy_night)
-                        } else if (weatherId == "703") {
-                            binding.img.setImageResource(R.drawable.foggy_night)
-                        } else if (weatherId == "704") {
-                            binding.img.setImageResource(R.drawable.foggy_night)
-                        } else if (weatherId == "771") {
-                            binding.img.setImageResource(R.drawable.foggy_night)
-                        } else if (weatherId == "762") {
-                            binding.img.setImageResource(R.drawable.foggy_night)
-                        } else if (weatherId == "763") {
-                            binding.img.setImageResource(R.drawable.foggy_night)
-                        } else if (weatherId == "751") {
-                            binding.img.setImageResource(R.drawable.snow_night)
-                        } else if (weatherId == "761") {
-                            binding.img.setImageResource(R.drawable.snow_night)
-                        } else if (weatherId == "752") {
-                            binding.img.setImageResource(R.drawable.snow_night)
-                        } else {
-                            binding.img.setImageResource(R.drawable.snow_night)
+                        when (weatherId) {
+                            "800" -> binding.img.setImageResource(R.drawable.moon)
+                            "801", "802" -> binding.img.setImageResource(R.drawable.pcloudy_night)
+                            "803", "804" -> binding.img.setImageResource(R.drawable.mcloudy_night)
+                            "500", "501", "502" -> binding.img.setImageResource(R.drawable.lrain_night)
+                            "503", "504", "511" -> binding.img.setImageResource(R.drawable.rain_night)
+                            "600", "601" -> binding.img.setImageResource(R.drawable.lsnow_night)
+                            "602" -> binding.img.setImageResource(R.drawable.snow_night)
+                            "611", "612", "613", "614" -> binding.img.setImageResource(R.drawable.sleet_night)
+                            "200", "201" -> binding.img.setImageResource(R.drawable.tshower_night)
+                            "202", "210", "211", "212" -> binding.img.setImageResource(R.drawable.tstorm_night)
+                            else -> binding.img.setImageResource(R.drawable.foggy_night)
                         }
                     }
 
-                    binding.tvStatus.text = weatherDescription.capitalize()
+                    binding.tvStatus.text = weatherDescription.replaceFirstChar { it.uppercase() }
                     binding.tvTemp.text = tempInt.toString()
                     binding.tvMinTemp.text = tempMin
                     binding.tvMaxTemp.text = tempMax
-                    binding.tvSunrise.text =
-                        SimpleDateFormat("hh:mm a", Locale.ENGLISH).format(Date(sunrise * 1000))
-                    binding.tvSunset.text =
-                        SimpleDateFormat("hh:mm a", Locale.ENGLISH).format(Date(sunset * 1000))
+                    binding.tvSunrise.text = SimpleDateFormat("hh:mm a", Locale.ENGLISH).format(Date(sunrise * 1000))
+                    binding.tvSunset.text = SimpleDateFormat("hh:mm a", Locale.ENGLISH).format(Date(sunset * 1000))
                     binding.tvWind.text = windSpeed
                     binding.tvPressure.text = pressure
                     binding.tvHumidity.text = humidity
@@ -388,32 +460,40 @@ class MainActivity : AppCompatActivity() {
                     binding.progressBar.visibility = View.GONE
                     binding.tvError.visibility = View.VISIBLE
                     binding.imgNetwork.visibility = View.VISIBLE
-                    Log.d("check", e.toString())
+                    Log.e("weatherTask", "Error parsing JSON: ${e.message}", e)
                 }
             } else {
                 binding.progressBar.visibility = View.GONE
                 binding.tvError.visibility = View.VISIBLE
                 binding.imgNetwork.visibility = View.VISIBLE
-                Log.d("check1", "e.toString()")
+                Log.e("weatherTask", "No response from API")
             }
         }
     }
 
-    inner class WeatherTaskHour : AsyncTask<String, Void, String>() {
+    inner class WeatherTaskHour(private val lat: Double, private val lon: Double) : AsyncTask<String, Void, String>() {
         override fun doInBackground(vararg params: String?): String? {
             var response: String? = null
+            var connection: HttpURLConnection? = null
             try {
-                val url =
-                    URL("https://api.openweathermap.org/data/2.5/forecast?q=$CITY&units=metric&appid=$API")
+                val url = URL("https://api.openweathermap.org/data/2.5/forecast?lat=$lat&lon=$lon&units=metric&appid=$API")
+                connection = url.openConnection() as HttpURLConnection
+                connection.requestMethod = "GET"
+                connection.connectTimeout = 5000
+                connection.readTimeout = 5000
 
-                with(url.openConnection() as HttpURLConnection) {
-                    requestMethod = "GET"
-                    inputStream.bufferedReader().use {
-                        response = it.readText()
-                    }
+                val responseCode = connection.responseCode
+                if (responseCode == HttpURLConnection.HTTP_OK) {
+                    response = connection.inputStream.bufferedReader().use { it.readText() }
+                } else {
+                    val errorStream = connection.errorStream?.bufferedReader()?.use { it.readText() }
+                    Log.e("WeatherTaskHour", "HTTP error: $responseCode, Message: $errorStream")
+                    return null
                 }
             } catch (e: Exception) {
-                Log.e("WeatherTask", "Error fetching data: ${e.message}")
+                Log.e("WeatherTaskHour", "Error fetching data: ${e.message}", e)
+            } finally {
+                connection?.disconnect()
             }
             return response
         }
@@ -428,18 +508,15 @@ class MainActivity : AppCompatActivity() {
                     val weatherList = mutableListOf<HourWeather>()
                     val weatherDayList = mutableListOf<DayWeather>()
 
-                    // Define the time range for filtering
                     val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
                     val dateFormat12 = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
                     val calendar = Calendar.getInstance()
 
-                    // Start of the time range: 15:00 on the first day
                     calendar.set(Calendar.HOUR_OF_DAY, 15)
                     calendar.set(Calendar.MINUTE, 0)
                     calendar.set(Calendar.SECOND, 0)
                     val startTime = dateFormat.format(calendar.time)
 
-                    // End of the time range: 12:00 on the following day
                     calendar.add(Calendar.DAY_OF_MONTH, 1)
                     calendar.set(Calendar.HOUR_OF_DAY, 12)
                     val endTime = dateFormat.format(calendar.time)
@@ -450,8 +527,6 @@ class MainActivity : AppCompatActivity() {
                     val sunriseDay: Long = city.getLong("sunrise")
                     val sunsetDay: Long = city.getLong("sunset")
 
-//                    var sunsetDay = sunsetLong.toString()
-//                    var sunsetDay = sunsetLong.toString()
                     for (i in 0 until listJson.length()) {
                         try {
                             val item = listJson.getJSONObject(i)
@@ -460,11 +535,11 @@ class MainActivity : AppCompatActivity() {
                             val weather = item.getJSONArray("weather").getJSONObject(0)
                             val checkRain = weather.getString("main")
                             var rainVolumeDay = "0"
-                            if (checkRain.equals("Rain")) {
-                                val rain = item.getJSONObject("rain")
-                                rainVolumeDay = rain.getString("3h")
-                            } else {
-                                rainVolumeDay = "0"
+                            if (checkRain == "Rain") {
+                                if (item.has("rain")) {
+                                    val rain = item.getJSONObject("rain")
+                                    rainVolumeDay = rain.optString("3h", "0")
+                                }
                             }
 
                             val temp = main.getString("temp")
@@ -478,10 +553,8 @@ class MainActivity : AppCompatActivity() {
 
                             val date1 = dateFormat.parse(dtTxt)
                             val timeFormat1 = SimpleDateFormat("ha", Locale.ENGLISH)
-                            val timeString1 = timeFormat1.format(date1)
-                                .toUpperCase(Locale.ENGLISH) // Time in "ha" format like "3PM"
+                            val timeString1 = timeFormat1.format(date1).toUpperCase(Locale.ENGLISH)
 
-                            // Determine the weather icon
                             val weatherId1 = weather.getString("id")
                             val weatherIcon1: String = when (weatherId1) {
                                 "800" -> if (isDaytime(dtTxt)) "sunny" else "moon"
@@ -493,28 +566,23 @@ class MainActivity : AppCompatActivity() {
                                 "611", "612", "613", "614" -> if (isDaytime(dtTxt)) "sleet" else "sleet_night"
                                 "200", "201" -> if (isDaytime(dtTxt)) "tshower" else "tshower_night"
                                 "202", "210", "211", "212" -> if (isDaytime(dtTxt)) "tstorm" else "tstorm_night"
-                                "701", "702", "703", "704", "771", "762", "763", "751", "761", "752" -> if (isDaytime(
-                                        dtTxt
-                                    )
-                                ) "foggy" else "foggy_night"
-
+                                "701", "702", "703", "704", "771", "762", "763", "751", "761", "752" ->
+                                    if (isDaytime(dtTxt)) "foggy" else "foggy_night"
                                 else -> if (isDaytime(dtTxt)) "foggy" else "foggy_night"
                             }
 
                             val tempDouble = temp.toDoubleOrNull() ?: 0.0
                             val tempInt = tempDouble.toInt()
 
-                            weatherList1.add(HourWeather("$date1","$tempInt", weatherIcon1, timeString1))
+                            weatherList1.add(HourWeather("$date1", "$tempInt", weatherIcon1, timeString1))
                             list1.clear()
                             list1.addAll(weatherList1)
 
                             if (dtTxt >= startTime && dtTxt <= endTime) {
                                 val date = dateFormat.parse(dtTxt)
                                 val timeFormat = SimpleDateFormat("ha", Locale.ENGLISH)
-                                val timeString = timeFormat.format(date)
-                                    .toUpperCase(Locale.ENGLISH) // Time in "ha" format like "3PM"
+                                val timeString = timeFormat.format(date).toUpperCase(Locale.ENGLISH)
 
-                                // Determine the weather icon
                                 val weatherId = weather.getString("id")
                                 val weatherIcon: String = when (weatherId) {
                                     "800" -> if (isDaytime(dtTxt)) "sunny" else "moon"
@@ -526,17 +594,12 @@ class MainActivity : AppCompatActivity() {
                                     "611", "612", "613", "614" -> if (isDaytime(dtTxt)) "sleet" else "sleet_night"
                                     "200", "201" -> if (isDaytime(dtTxt)) "tshower" else "tshower_night"
                                     "202", "210", "211", "212" -> if (isDaytime(dtTxt)) "tstorm" else "tstorm_night"
-                                    "701", "702", "703", "704", "771", "762", "763", "751", "761", "752" -> if (isDaytime(
-                                            dtTxt
-                                        )
-                                    ) "foggy" else "foggy_night"
-
+                                    "701", "702", "703", "704", "771", "762", "763", "751", "761", "752" ->
+                                        if (isDaytime(dtTxt)) "foggy" else "foggy_night"
                                     else -> if (isDaytime(dtTxt)) "foggy" else "foggy_night"
                                 }
 
-                                val tempDouble = temp.toDoubleOrNull() ?: 0.0
-                                val tempInt = tempDouble.toInt()
-                                weatherList.add(HourWeather("$date","$tempInt", weatherIcon, timeString))
+                                weatherList.add(HourWeather("$date", "$tempInt", weatherIcon, timeString))
                             }
 
                             val date = dateFormat.parse(dtTxt)
@@ -544,7 +607,6 @@ class MainActivity : AppCompatActivity() {
                             val dateOf5Day = dateTime.format(date)
 
                             if (dateOf5Day == defaultTime12) {
-
                                 val date1 = dateFormat.parse(dtTxt)
                                 val dateTime1 = SimpleDateFormat("MMM, d", Locale.ENGLISH)
                                 val dateOf5Day1 = dateTime1.format(date1)
@@ -557,38 +619,15 @@ class MainActivity : AppCompatActivity() {
                                 val weatherId1 = weather.getString("id")
                                 val weatherIcon5Day = when (weatherId1) {
                                     "800" -> "sunny"
-                                    "801" -> "pcloudy"
-                                    "802" -> "pcloudy"
-                                    "803" -> "mcloudy"
-                                    "804" -> "mcloudy"
-                                    "500" -> "lrain"
-                                    "502" -> "lrain"
-                                    "503" -> "rain"
-                                    "504" -> "rain"
-                                    "511" -> "lsnow"
-                                    "600" -> "lsnow"
-                                    "601" -> "lsnow"
-                                    "602" -> "snow"
-                                    "611" -> "sleet"
-                                    "612" -> "sleet"
-                                    "613" -> "sleet"
-                                    "614" -> "sleet"
-                                    "200" -> "tshower"
-                                    "201" -> "tshower"
-                                    "202" -> "tstorm"
-                                    "210" -> "sleet"
-                                    "211" -> "sleet"
-                                    "212" -> "sleet"
-                                    "701" -> "foggy"
-                                    "702" -> "foggy"
-                                    "703" -> "foggy"
-                                    "704" -> "foggy"
-                                    "771" -> "foggy"
-                                    "762" -> "foggy"
-                                    "763" -> "foggy"
-                                    "751" -> "foggy"
-                                    "761" -> "foggy"
-                                    "752" -> "foggy"
+                                    "801", "802" -> "pcloudy"
+                                    "803", "804" -> "mcloudy"
+                                    "500", "502" -> "lrain"
+                                    "503", "504" -> "rain"
+                                    "511", "600", "601", "602" -> "lsnow"
+                                    "611", "612", "613", "614" -> "sleet"
+                                    "200", "201" -> "tshower"
+                                    "202", "210", "211", "212" -> "tstorm"
+                                    "701", "702", "703", "704", "771", "762", "763", "751", "761", "752" -> "foggy"
                                     else -> "foggy"
                                 }
 
@@ -609,10 +648,10 @@ class MainActivity : AppCompatActivity() {
                                 )
                             }
                         } catch (e: Exception) {
-                            Log.d("checkRain", e.toString())
+                            Log.e("WeatherTaskHour", "Error processing item: ${e.message}")
                         }
-
                     }
+
                     list.clear()
                     list.addAll(weatherList)
                     adapter.notifyDataSetChanged()
@@ -622,10 +661,10 @@ class MainActivity : AppCompatActivity() {
                     adapterDay.notifyDataSetChanged()
 
                 } catch (e: Exception) {
-                    Log.e("WeatherTask", "Error parsing JSON: ${e.message}")
+                    Log.e("WeatherTaskHour", "Error parsing JSON: ${e.message}")
                 }
             } else {
-                Log.d("WeatherTask", "No response from API")
+                Log.e("WeatherTaskHour", "No response from API")
             }
         }
 

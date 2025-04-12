@@ -634,4 +634,12 @@ class MainActivity : AppCompatActivity() {
             return hour in 6..17
         }
     }
+
+    private fun fetchWeatheDays(){
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) {
+                setUpRecycleView()
+            }
+        }
+    }
 }
